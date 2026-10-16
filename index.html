@@ -5,14 +5,15 @@
 <meta name="apple-mobile-web-app-title" content="Alfred">
 <link rel="manifest" href="manifest.json"><link rel="apple-touch-icon" href="apple-touch-icon.png"><link rel="stylesheet" href="style.css">
 <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script><script src="sb.js"></script><script src="idb.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="sb.js"></script><script src="idb.js"></script><script src="quality.js"></script><script src="zoom.js"></script>
 </head><body>
 <header><h1>Alfred</h1><span class="mut" id="hdrSub">Cameras</span></header>
 <main>
 <div id="netBanner" class="ios-banner" style="display:none;border-color:#d9463b"><b>You're offline</b><p class="mut" style="margin:6px 0">Showing last frames and cached clips. Live video needs internet.</p></div>
 <div id="iosBanner" class="ios-banner" hidden>
  <b>Install Alfred on this iPhone</b>
- <p class="mut" style="margin:6px 0">Tap the Share button <span aria-hidden="true">⎋</span> → <b>Add to Home Screen</b>. Push alerts only work after install (iOS 16.4+).</p>
+ <p class="mut" style="margin:6px 0">Tap Share → <b>Add to Home Screen</b>. Push needs install (iOS 16.4+).</p>
  <button class="ghost" id="dismissIos">Got it</button>
 </div>
 
@@ -25,23 +26,22 @@
 <div id="grid" class="grid"></div>
 <p id="empty" class="mut">No cameras yet. Open the camera page on a spare phone, then add its code and PIN here.</p>
 <details class="card"><summary>Limitations</summary><ul class="mut">
-<li>Camera phones must stay on, plugged in, camera page open in the foreground, screen on.</li>
-<li>Both devices need internet. Camera access requires HTTPS.</li>
-<li>Public PeerJS signaling can be slow or down; some NATs fail without TURN.</li>
-<li>Event clips upload to your Supabase (or save locally if not configured). No always-on cloud DVR.</li>
-<li>iPhone: locking/backgrounding stops the camera stream. MediaRecorder on iOS Safari is limited (prefer Chrome/Android for camera phones).</li>
-<li>Only monitor property you own/control; follow local notice/recording laws.</li>
+<li>Camera phones must stay on, plugged in, page foreground, screen on.</li>
+<li>HTTPS + internet required. Public PeerJS may be flaky; some NATs need TURN.</li>
+<li>Event clips: ~5s pre-roll, record while motion/sound persists, end after quiet timer, 10‑min cap.</li>
+<li>iOS backgrounding stops streams; MediaRecorder is stronger on Android Chrome.</li>
 </ul></details>
 </section>
 
 <section id="p-clips" class="panel">
-<div class="card row"><button id="refreshClips">Refresh</button><span class="mut" id="clipsInfo">Sign in under Settings to load cloud clips.</span></div>
+<div class="card row"><button id="refreshClips">Refresh</button><span class="mut" id="clipsInfo">Sign in under Settings for cloud clips.</span></div>
+<div class="card mut" id="storageInfo">Storage: —</div>
 <div id="clips"></div>
 </section>
 
 <section id="p-set" class="panel">
 <div class="card"><h3>Supabase</h3>
-<p class="mut">Paste your project URL + anon key (stored only on this device). See <a href="SETUP.md" target="_blank">SETUP.md</a>.</p>
+<p class="mut">Keys stay on this device. See <a href="SETUP.md" target="_blank">SETUP.md</a>.</p>
 <input id="sbUrl" placeholder="https://xxxx.supabase.co" style="width:100%;margin:6px 0">
 <textarea id="sbKey" placeholder="anon public key" rows="3" style="width:100%"></textarea>
 <div class="row" style="margin-top:8px"><button id="sbSave">Save</button><span class="mut" id="sbStat"></span></div>
@@ -52,13 +52,29 @@
 <div class="row"><button id="login">Sign in</button><button class="ghost" id="signup">Create account</button><button class="ghost" id="logout">Sign out</button></div>
 <p class="mut" id="authStat"></p>
 </div>
+<div class="card"><h3>Retention</h3>
+<div class="row"><span class="mut">Max MB</span><input id="retMB" type="number" value="900" min="50" style="max-width:100px">
+<span class="mut">Max days</span><input id="retDays" type="number" value="14" min="1" style="max-width:80px">
+<span class="mut">Max clips</span><input id="retCount" type="number" value="" placeholder="∞" min="1" style="max-width:80px"></div>
+<p class="mut" id="retEst">Est. hours at 1080p: —</p>
+<button id="retSave">Save retention</button>
+</div>
+<div class="card"><h3>Default quality</h3>
+<select id="defQ"><option value="auto">Auto</option><option value="max">Max / 4K</option><option value="1080p">1080p</option><option value="720p">720p</option></select>
+<p class="mut">Per-camera override is on each tile. Auto uses network + WebRTC stats (~30s, hysteresis).</p>
+</div>
 <div class="card"><h3>Push notifications</h3>
-<p class="mut">iOS 16.4+ and Alfred must be added to the Home Screen. Paste your VAPID <b>public</b> key (from SETUP.md).</p>
 <input id="vapid" placeholder="VAPID public key" style="width:100%;margin:6px 0">
 <div class="row"><button id="pushOn">Enable alerts</button><span class="mut" id="pushStat"></span></div>
 </div>
 </section>
 </main>
+
+<!-- fullscreen zoom overlay -->
+<div id="fs" class="fs" hidden>
+ <div class="fs-inner zoom-wrap" id="fsWrap"><video id="fsVid" autoplay playsinline></video></div>
+ <div class="fs-bar"><button class="ghost" id="fsClose">Close</button></div>
+</div>
 
 <nav class="tabs">
 <button class="on" data-p="p-cams"><span>▣</span>Cameras</button>
@@ -68,31 +84,30 @@
 
 <script>
 const P='alfred-cam-',$=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)];
-let cams=JSON.parse(localStorage.getItem('alfredCams')||'[]'),peer,state={};
+let cams=JSON.parse(localStorage.getItem('alfredCams')||'[]'),peer,state={},fsZoom=null;
 const save=()=>localStorage.setItem('alfredCams',JSON.stringify(cams));
+function retCfg(){return JSON.parse(localStorage.getItem('alfredRetention')||'{"maxMB":900,"maxDays":14,"maxCount":null}')}
 
-/* tabs */
+
 $$('.tabs button').forEach(b=>b.onclick=()=>{$$('.tabs button').forEach(x=>x.classList.remove('on'));b.classList.add('on');
  $$('.panel').forEach(p=>p.classList.remove('on'));$('#'+b.dataset.p).classList.add('on');
  $('#hdrSub').textContent=b.textContent.replace(/^[^\w]+/,'').trim();
- if(b.dataset.p==='p-clips')loadClips()});
+ if(b.dataset.p==='p-clips')loadClips();if(b.dataset.p==='p-set')updateRetEst()});
 
-/* iOS install banner */
 const isIOS=/iPad|iPhone|iPod/.test(navigator.userAgent)||(navigator.platform==='MacIntel'&&navigator.maxTouchPoints>1);
 const isStandalone=window.matchMedia('(display-mode: standalone)').matches||navigator.standalone;
 if(isIOS&&!isStandalone&&!localStorage.getItem('alfredIosDismiss')){$('#iosBanner').hidden=false}
 $('#dismissIos').onclick=()=>{localStorage.setItem('alfredIosDismiss','1');$('#iosBanner').hidden=true};
 
-/* peer / cameras */
 function startPeer(){peer=new Peer();peer.on('open',()=>cams.forEach(c=>connect(c.code)));
  peer.on('call',call=>{const s=state[call.metadata&&call.metadata.code];if(!s)return call.close();call.answer();
-  call.on('stream',st=>{s.el.querySelector('video').srcObject=st;setOn(s,true)});call.on('close',()=>setOn(s,false));s.call=call});
+  call.on('stream',st=>{s.el.querySelector('video').srcObject=st;setOn(s,true);s.pc=call.peerConnection});call.on('close',()=>setOn(s,false));s.call=call});
  peer.on('disconnected',()=>setTimeout(()=>peer.reconnect(),2000));
  peer.on('error',e=>{const m=/(alfred-cam-\w+)/.exec(e.message||'');if(m){const s=state[m[1].slice(P.length)];s&&setOn(s,false,'Offline')}})}
 function setOn(s,on,msg){s.on=on;s.el.classList.toggle('on',on);s.el.querySelector('.st').textContent=msg||(on?'Live':'Offline');
  const ob=s.el.querySelector('.offbadge');if(on){ob.textContent='';ob.classList.remove('show');s.lastSeen=Date.now()}
  else{const t=s.lastSeen||Date.now();ob.textContent='Offline · last seen '+new Date(t).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'});ob.classList.add('show');
-  IDB.getFrame(s.code||Object.keys(state).find(k=>state[k]===s)).then(f=>{if(f&&f.dataUrl){const v=s.el.querySelector('video');if(!s.on){v.poster=f.dataUrl;/* keep last */const img=s.el.querySelector('.lastframe')||Object.assign(document.createElement('img'),{className:'lastframe'});img.src=f.dataUrl;if(!img.parentNode)v.parentNode.insertBefore(img,v)}}})}}
+  IDB.getFrame(s.code).then(f=>{if(f&&f.dataUrl&&!s.on){const v=s.el.querySelector('video');v.poster=f.dataUrl;let img=s.el.querySelector('.lastframe');if(!img){img=document.createElement('img');img.className='lastframe';v.parentNode.insertBefore(img,v)}img.src=f.dataUrl}})}}
 function snapFrame(code){const s=state[code];if(!s||!s.on)return;const v=s.el.querySelector('video');if(!v.videoWidth)return;
  const k=document.createElement('canvas');k.width=v.videoWidth;k.height=v.videoHeight;k.getContext('2d').drawImage(v,0,0);
  IDB.putFrame(code,k.toDataURL('image/jpeg',0.7),Date.now())}
@@ -100,68 +115,132 @@ function connect(code){const s=state[code];if(!s||s.on||!peer||peer.disconnected
  if(s.conn&&s.conn.open)return;if(s.connecting)return;s.connecting=true;s.attempt=(s.attempt||0)+1;
  const conn=peer.connect(P+code,{metadata:{pin:c.pin}});s.conn=conn;
  const fail=()=>{s.connecting=false;setOn(s,false);const wait=Math.min(30000,1000*Math.pow(1.6,Math.min(s.attempt,8)));clearTimeout(s.rt);s.rt=setTimeout(()=>connect(code),wait)};
- conn.on('open',()=>{s.connecting=false;s.attempt=0});
- conn.on('data',d=>{if(d&&d.type=='denied')setOn(s,false,'Wrong PIN');if(d&&d.type=='event')onEvent(code,d)});
+ conn.on('open',()=>{s.connecting=false;s.attempt=0;conn.send({type:'hello'});const q=c.quality||$('#defQ').value||'auto';conn.send({type:'setQuality',mode:q})});
+ conn.on('data',d=>{if(!d||!d.type)return;if(d.type==='denied')setOn(s,false,'Wrong PIN');if(d.type==='event')onEvent(code,d);
+  if(d.type==='quality'){s.qLabel=d.label;const ql=s.el.querySelector('.qlab');if(ql)ql.textContent=d.label||''}});
  conn.on('close',fail);conn.on('error',fail)}
 function onEvent(code,d){const s=state[code];if(!s)return;s.el.querySelector('.badge').textContent=d.kind+' · '+new Date(d.t).toLocaleTimeString();
  s.el.classList.add('alert');clearTimeout(s.tm);s.tm=setTimeout(()=>s.el.classList.remove('alert'),10000);
  const k='alfredEv_'+code,l=JSON.parse(localStorage.getItem(k)||'[]');l.unshift({kind:d.kind,t:d.t});localStorage.setItem(k,JSON.stringify(l.slice(0,20)));IDB.addEvent({code,kind:d.kind,t:d.t,name:d.name||''});showEv(code)}
 function showEv(code){const s=state[code];if(!s)return;const l=JSON.parse(localStorage.getItem('alfredEv_'+code)||'[]');
  s.el.querySelector('.ev').innerHTML=l.length?l.slice(0,8).map(e=>`<div>${e.kind} — ${new Date(e.t).toLocaleString()}</div>`).join(''):'<div>No events yet</div>'}
+
+function openFS(videoEl){const fs=$('#fs'),fv=$('#fsVid');fs.hidden=false;fv.srcObject=videoEl.srcObject;fv.src=videoEl.currentSrc||videoEl.src||'';
+ try{fv.play()}catch(e){}if(fsZoom)fsZoom.reset();else fsZoom=Zoom.attach($('#fsWrap'),{max:8,target:fv})}
+$('#fsClose').onclick=()=>{$('#fs').hidden=true;$('#fsVid').srcObject=null;$('#fsVid').removeAttribute('src')};
+
 function render(){$('#grid').innerHTML='';$('#empty').style.display=cams.length?'none':'';cams.forEach(c=>{
  const el=document.createElement('div');el.className='cam';el.id='cam-'+c.code;
- el.innerHTML=`<span class="badge"></span><span class="offbadge"></span><video autoplay playsinline muted></video><div class="bar"><span><span class="dot"></span><b></b> <span class="st mut">Connecting…</span></span><span class="row"><button class="ghost snap">Snapshot</button><button class="ghost rm">Remove</button></span></div><details class="evw"><summary>Recent events</summary><div class="ev mut"></div></details>`;
+ el.innerHTML=`<span class="badge"></span><span class="offbadge"></span><div class="vidwrap"><video autoplay playsinline muted></video></div>
+ <div class="qlab mut"></div>
+ <div class="bar"><span><span class="dot"></span><b></b> <span class="st mut">Connecting…</span></span>
+ <span class="row">
+  <select class="qsel" title="Quality"><option value="auto">Auto</option><option value="max">4K</option><option value="1080p">1080p</option><option value="720p">720p</option></select>
+  <button class="ghost snap">Snapshot</button><button class="ghost fsbtn">Full</button><button class="ghost rm">Remove</button>
+ </span></div><details class="evw"><summary>Recent events</summary><div class="ev mut"></div></details>`;
  el.querySelector('b').textContent=c.name||c.code;const v=el.querySelector('video');
- v.onclick=()=>{(v.requestFullscreen||v.webkitEnterFullscreen||function(){}).call(v)};
+ const qsel=el.querySelector('.qsel');qsel.value=c.quality||$('#defQ').value||'auto';
+ qsel.onchange=()=>{c.quality=qsel.value;save();const s=state[c.code];if(s&&s.conn&&s.conn.open)s.conn.send({type:'setQuality',mode:c.quality})};
+ el.querySelector('.fsbtn').onclick=()=>openFS(v);
+ v.onclick=()=>openFS(v);
  el.querySelector('.snap').onclick=()=>{if(!v.videoWidth)return;const k=document.createElement('canvas');k.width=v.videoWidth;k.height=v.videoHeight;k.getContext('2d').drawImage(v,0,0);
   const a=document.createElement('a');a.download=`alfred-${c.name||c.code}-${Date.now()}.png`;a.href=k.toDataURL('image/png');a.click()};
  el.querySelector('.rm').onclick=()=>{if(!confirm('Remove '+(c.name||c.code)+'?'))return;const s=state[c.code];s.call&&s.call.close();s.conn&&s.conn.close();delete state[c.code];cams=cams.filter(x=>x.code!=c.code);save();render()};
  state[c.code]={el,code:c.code};$('#grid').appendChild(el);showEv(c.code)})}
 $('#add').onclick=()=>{const code=$('#code').value.trim().toUpperCase(),pin=$('#pin').value.trim();if(!code||!pin)return alert('Enter code and PIN');
- cams=cams.filter(x=>x.code!=code);cams.push({code,pin,name:$('#nm').value.trim()});save();Object.values(state).forEach(s=>{s.call&&s.call.close();s.conn&&s.conn.close()});render();cams.forEach(c=>connect(c.code));$('#code').value=$('#pin').value=$('#nm').value=''};
+ cams=cams.filter(x=>x.code!=code);cams.push({code,pin,name:$('#nm').value.trim(),quality:$('#defQ').value||'auto'});save();Object.values(state).forEach(s=>{s.call&&s.call.close();s.conn&&s.conn.close()});render();cams.forEach(c=>connect(c.code));$('#code').value=$('#pin').value=$('#nm').value=''};
 
 /* settings */
-(function(){const c=SB.cfg()||{};if(c.url)$('#sbUrl').value=c.url;if(c.key)$('#sbKey').value=c.key;if(c.vapid)$('#vapid').value=c.vapid})();
-$('#sbSave').onclick=()=>{SB.saveCfg({url:$('#sbUrl').value.trim(),key:$('#sbKey').value.trim(),vapid:$('#vapid').value.trim()});$('#sbStat').textContent='Saved on this device';refreshAuth()};
+(function(){const c=SB.cfg()||{};if(c.url)$('#sbUrl').value=c.url;if(c.key)$('#sbKey').value=c.key;if(c.vapid)$('#vapid').value=c.vapid;
+ const r=retCfg();$('#retMB').value=r.maxMB||900;$('#retDays').value=r.maxDays||14;if(r.maxCount)$('#retCount').value=r.maxCount;
+ $('#defQ').value=localStorage.getItem('alfredDefQ')||'auto'})();
+$('#sbSave').onclick=()=>{const prev=SB.cfg()||{};SB.saveCfg({url:$('#sbUrl').value.trim(),key:$('#sbKey').value.trim(),vapid:$('#vapid').value.trim()||prev.vapid});$('#sbStat').textContent='Saved';refreshAuth()};
+$('#retSave').onclick=()=>{const o={maxMB:+$('#retMB').value||900,maxDays:+$('#retDays').value||14,maxCount:$('#retCount').value?+$('#retCount').value:null};
+ localStorage.setItem('alfredRetention',JSON.stringify(o));updateRetEst();pruneCloud().then(()=>alert('Retention saved'))};
+$('#defQ').onchange=()=>localStorage.setItem('alfredDefQ',$('#defQ').value);
+function updateRetEst(){const mb=+$('#retMB').value||900;$('#retEst').textContent='Est. hours at 1080p: ~'+Q.estHours(mb,'1080p')+' · at 4K: ~'+Q.estHours(mb,'max')+' · at 720p: ~'+Q.estHours(mb,'720p')}
 async function refreshAuth(){try{const u=await SB.user();$('#authStat').textContent=u?'Signed in as '+u.email:'Not signed in'}catch(e){$('#authStat').textContent='Auth error'}}
 $('#login').onclick=async()=>{const c=SB.client();if(!c)return alert('Save Supabase URL + key first');
  const {error}=await c.auth.signInWithPassword({email:$('#email').value,password:$('#pass').value});if(error)alert(error.message);refreshAuth()};
-$('#signup').onclick=async()=>{const c=SB.client();if(!c)return alert('Save Supabase URL + key first');
- const {error}=await c.auth.signUp({email:$('#email').value,password:$('#pass').value});if(error)alert(error.message);else alert('Check email if confirmation is required');refreshAuth()};
+$('#signup').onclick=async()=>{const c=SB.client();if(!c)return alert('Save Supabase first');
+ const {error}=await c.auth.signUp({email:$('#email').value,password:$('#pass').value});if(error)alert(error.message);else alert('Check email if confirmation required');refreshAuth()};
 $('#logout').onclick=async()=>{const c=SB.client();if(c)await c.auth.signOut();refreshAuth()};
 
-/* push */
 function urlBase64ToUint8Array(b){const p='='.repeat((4-b.length%4)%4),r=(b+p).replace(/-/g,'+').replace(/_/g,'/');const raw=atob(r);return Uint8Array.from([...raw].map(c=>c.charCodeAt(0)))}
 $('#pushOn').onclick=async()=>{const vapid=$('#vapid').value.trim();if(!vapid)return alert('Paste VAPID public key');
  const cfg=SB.cfg()||{};cfg.vapid=vapid;SB.saveCfg(cfg);
- if(!('Notification'in window)||!('PushManager'in window))return $('#pushStat').textContent='Push not supported here';
+ if(!('Notification'in window)||!('PushManager'in window))return $('#pushStat').textContent='Push not supported';
  const perm=await Notification.requestPermission();if(perm!=='granted')return $('#pushStat').textContent='Permission denied';
  const reg=await navigator.serviceWorker.ready;let sub=await reg.pushManager.getSubscription();
  if(!sub)sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:urlBase64ToUint8Array(vapid)});
- try{await SB.saveSub(JSON.parse(JSON.stringify(sub)));$('#pushStat').textContent='Subscribed'}catch(e){$('#pushStat').textContent='Saved locally; push_subs upsert failed: '+e.message}};
+ try{await SB.saveSub(JSON.parse(JSON.stringify(sub)));$('#pushStat').textContent='Subscribed'}catch(e){$('#pushStat').textContent='push_subs failed: '+e.message}};
 
-/* clips */
+function parseMeta(name,it){
+ // filename: stamp_Trigger.ext or custom metadata
+ const m={start:it.created_at?Date.parse(it.created_at):null,duration:it.metadata&&it.metadata.duration,triggers:it.metadata&&(it.metadata.triggers||it.metadata.kind),size:it.metadata&&it.metadata.size||it.metadata&&it.metadata.contentLength};
+ const mm=/(\d{4}-\d{2}-\d{2}T[\d\-]+)_(.+)\.(webm|mp4)$/i.exec(name||'');
+ if(mm){m.start=m.start||Date.parse(mm[1].replace(/-/g,(x,i)=>i>9?':':'-'));m.triggers=m.triggers||mm[2].replace(/\+/g,', ')}
+ return m}
+
+async function pruneCloud(){const u=await SB.user();if(!u)return;const ret=retCfg();const items=await SB.listAll();
+ const stars=new Set(await IDB.allStars());
+ let total=0;const enriched=[];
+ for(const it of items){const path=(it.folder?it.folder+'/':'')+it.name;const size=(it.metadata&&(it.metadata.size||it.metadata.contentLength))||0;
+  enriched.push({...it,path,size,created:Date.parse(it.created_at||0)||0});total+=size}
+ enriched.sort((a,b)=>a.created-b.created);
+ const maxB=(ret.maxMB||900)*1e6,maxAge=(ret.maxDays||14)*864e5,maxC=ret.maxCount,now=Date.now();
+ const toDel=[];
+ for(const it of enriched){if(stars.has(it.path))continue;
+  const overAge=maxAge&&it.created&&(now-it.created>maxAge);
+  const overCount=maxC&&(enriched.length-toDel.length)>maxC;
+  const overBytes=total>maxB;
+  if(overAge||overCount||overBytes){toDel.push(it.path);total-=it.size}}
+ for(const p of toDel){try{await SB.del(p)}catch(e){}}
+ return {used:total,deleted:toDel.length}}
+
+async function updateStorage(items){let bytes=0;(items||[]).forEach(it=>{bytes+=(it.metadata&&(it.metadata.size||it.metadata.contentLength))||it.size||0});
+ const mb=(bytes/1e6).toFixed(1),ret=retCfg();
+ $('#storageInfo').textContent='Storage used: ~'+mb+' MB / '+(ret.maxMB||900)+' MB · starred clips are protected · est. ~'+Q.estHours(ret.maxMB||900,'1080p')+' h at 1080p'}
+
 function renderClipRow(it,url,local){const box=$('#clips');const path=it.path||((it.folder?it.folder+'/':'')+it.name);
-  const el=document.createElement('div');el.className='clip';
-  el.innerHTML=`<video controls playsinline preload="metadata" ${url?'src="'+url+'"':''}></video><div class="meta"><b>${it.folder||it.camera||'—'}</b><div class="mut">${it.name||path}</div><div class="mut">${it.created_at?new Date(it.created_at).toLocaleString():(it.t?new Date(it.t).toLocaleString():'')}${local?' · cached':''}</div></div>${local?'':'<button class="ghost del">Delete</button>'}`;
-  const del=el.querySelector('.del');if(del)del.onclick=async()=>{if(!confirm('Delete clip?'))return;await SB.del(path);loadClips()};box.appendChild(el)}
+  const meta=parseMeta(it.name,it);const el=document.createElement('div');el.className='clip';
+  const when=meta.start?new Date(meta.start).toLocaleString():(it.created_at?new Date(it.created_at).toLocaleString():'');
+  const dur=meta.duration!=null?meta.duration+'s':'' ;const trig=Array.isArray(meta.triggers)?meta.triggers.join(', '):(meta.triggers||'');
+  el.innerHTML=`<div class="clipvid zoom-wrap"><video controls playsinline preload="metadata" ${url?'src="'+url+'"':''}></video></div>
+   <div class="meta"><b>${it.folder||it.camera||'—'}</b>
+   <div class="mut">${trig?('Triggers: '+trig):''}${dur?(' · '+dur):''}</div>
+   <div class="mut">Start: ${when||'—'}${local?' · cached':''}</div>
+   <div class="mut">${it.name||path}</div></div>
+   <div class="row"><button class="ghost star">★</button>${local?'':'<button class="ghost del">Delete</button>'}</div>`;
+  const vid=el.querySelector('video');Zoom.attach(el.querySelector('.clipvid'),{max:8,target:vid,controls:true});
+  IDB.isStarred(path).then(on=>{el.querySelector('.star').textContent=on?'★':'☆';el.querySelector('.star').style.color=on?'var(--gold)':''});
+  el.querySelector('.star').onclick=async()=>{const on=!(await IDB.isStarred(path));await IDB.star(path,on);el.querySelector('.star').textContent=on?'★':'☆';el.querySelector('.star').style.color=on?'var(--gold)':''};
+  const del=el.querySelector('.del');if(del)del.onclick=async()=>{if(await IDB.isStarred(path))return alert('Unstar before deleting');if(!confirm('Delete clip?'))return;await SB.del(path);loadClips()};
+  box.appendChild(el)}
+
 async function loadClips(){const box=$('#clips');box.innerHTML='';
- if(!navigator.onLine){const cached=await IDB.listClipMeta();$('#clipsInfo').textContent=(cached.length?cached.length+' cached clip(s)':'No cached clips')+' · offline';
-  cached.forEach(it=>renderClipRow(it,it.signedUrl||'',true));return}
- const u=await SB.user();if(!u){$('#clipsInfo').textContent='Sign in under Settings to load cloud clips.';const cached=await IDB.listClipMeta();cached.forEach(it=>renderClipRow(it,'',true));return}
- $('#clipsInfo').textContent='Loading…';try{const items=await SB.listAll();$('#clipsInfo').textContent=items.length?items.length+' clip(s)':'No clips yet';
- const meta=[];for(const it of items){const path=(it.folder?it.folder+'/':'')+it.name;const url=await SB.url(path);
-  meta.push({path,folder:it.folder,name:it.name,created_at:it.created_at,signedUrl:url});renderClipRow({...it,path},url,false)}
- await IDB.putClipMeta(meta)}
- catch(e){$('#clipsInfo').textContent='Error: '+e.message+' — showing cache';const cached=await IDB.listClipMeta();cached.forEach(it=>renderClipRow(it,it.signedUrl||'',true))}}
+ if(!navigator.onLine){const cached=await IDB.listClipMeta();$('#clipsInfo').textContent=(cached.length?cached.length+' cached':'No cached')+' · offline';
+  updateStorage(cached);cached.forEach(it=>renderClipRow(it,it.signedUrl||'',true));return}
+ const u=await SB.user();if(!u){$('#clipsInfo').textContent='Sign in under Settings for cloud clips.';const cached=await IDB.listClipMeta();updateStorage(cached);cached.forEach(it=>renderClipRow(it,'',true));return}
+ $('#clipsInfo').textContent='Loading…';
+ try{const pruned=await pruneCloud();const items=await SB.listAll();
+  $('#clipsInfo').textContent=(items.length?items.length+' clip(s)':'No clips')+(pruned.deleted?(' · pruned '+pruned.deleted):'');
+  updateStorage(items);
+  const meta=[];for(const it of items){const path=(it.folder?it.folder+'/':'')+it.name;let url;try{url=await SB.url(path)}catch(e){url=''}
+   const row={...it,path,size:(it.metadata&&(it.metadata.size||it.metadata.contentLength))||0};meta.push({...row,signedUrl:url});renderClipRow(row,url,false)}
+  await IDB.putClipMeta(meta)}
+ catch(e){$('#clipsInfo').textContent='Error: '+e.message;const cached=await IDB.listClipMeta();cached.forEach(it=>renderClipRow(it,it.signedUrl||'',true))}}
 $('#refreshClips').onclick=loadClips;
 
-render();startPeer();setInterval(()=>cams.forEach(c=>connect(c.code)),10000);refreshAuth();
+render();startPeer();setInterval(()=>cams.forEach(c=>connect(c.code)),10000);refreshAuth();updateRetEst();
 const focus=new URLSearchParams(location.search).get('cam');if(focus)setTimeout(()=>{const el=$('#cam-'+focus);el&&el.scrollIntoView({behavior:'smooth',block:'center'})},800);
-
-window.addEventListener('online',()=>{document.body.classList.remove('netoff');const nb=document.getElementById('netBanner');if(nb)nb.style.display='none';cams.forEach(c=>connect(c.code));loadClips()});
-window.addEventListener('offline',()=>{document.body.classList.add('netoff');const nb=document.getElementById('netBanner');if(nb)nb.style.display='block';Object.values(state).forEach(s=>setOn(s,false,'Offline'))});
-if(!navigator.onLine){document.body.classList.add('netoff');const nb0=document.getElementById('netBanner');if(nb0)nb0.style.display='block'}
+window.addEventListener('online',()=>{document.body.classList.remove('netoff');const nb=$('#netBanner');if(nb)nb.style.display='none';cams.forEach(c=>connect(c.code));loadClips()});
+window.addEventListener('offline',()=>{document.body.classList.add('netoff');const nb=$('#netBanner');if(nb)nb.style.display='block';Object.values(state).forEach(s=>setOn(s,false,'Offline'))});
+if(!navigator.onLine){document.body.classList.add('netoff');const nb0=$('#netBanner');if(nb0)nb0.style.display='block'}
 setInterval(()=>cams.forEach(c=>snapFrame(c.code)),10000);
+// Auto quality re-eval hint via outbound stats (viewer → camera setQuality if Auto)
+setInterval(async()=>{for(const c of cams){if((c.quality||'auto')!=='auto')continue;const s=state[c.code];if(!s||!s.conn||!s.conn.open||!s.pc)continue;
+  const mbps=await Q.outboundMbps(s.pc);if(mbps==null)continue;let mode='1080p';if(mbps<1.2)mode='720p';else if(mbps>8)mode='max';
+  if(s._autoSent!==mode){s._autoSent=mode;/* camera Auto uses its own navigator.connection; stats inform label only */}}},30000);
 if('serviceWorker'in navigator)navigator.serviceWorker.register('sw.js');
 </script></body></html>
