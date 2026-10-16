@@ -5,10 +5,11 @@
 <meta name="apple-mobile-web-app-title" content="Alfred">
 <link rel="manifest" href="manifest.json"><link rel="apple-touch-icon" href="apple-touch-icon.png"><link rel="stylesheet" href="style.css">
 <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script><script src="sb.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script><script src="sb.js"></script><script src="idb.js"></script>
 </head><body>
 <header><h1>Alfred</h1><span class="mut" id="hdrSub">Cameras</span></header>
 <main>
+<div id="netBanner" class="ios-banner" style="display:none;border-color:#d9463b"><b>You're offline</b><p class="mut" style="margin:6px 0">Showing last frames and cached clips. Live video needs internet.</p></div>
 <div id="iosBanner" class="ios-banner" hidden>
  <b>Install Alfred on this iPhone</b>
  <p class="mut" style="margin:6px 0">Tap the Share button <span aria-hidden="true">⎋</span> → <b>Add to Home Screen</b>. Push alerts only work after install (iOS 16.4+).</p>
@@ -88,25 +89,34 @@ function startPeer(){peer=new Peer();peer.on('open',()=>cams.forEach(c=>connect(
   call.on('stream',st=>{s.el.querySelector('video').srcObject=st;setOn(s,true)});call.on('close',()=>setOn(s,false));s.call=call});
  peer.on('disconnected',()=>setTimeout(()=>peer.reconnect(),2000));
  peer.on('error',e=>{const m=/(alfred-cam-\w+)/.exec(e.message||'');if(m){const s=state[m[1].slice(P.length)];s&&setOn(s,false,'Offline')}})}
-function setOn(s,on,msg){s.on=on;s.el.classList.toggle('on',on);s.el.querySelector('.st').textContent=msg||(on?'Live':'Offline')}
-function connect(code){const s=state[code];if(!s||s.on||!peer||peer.disconnected||!peer.id)return;const c=cams.find(x=>x.code==code);
- if(s.conn&&s.conn.open)return;const conn=peer.connect(P+code,{metadata:{pin:c.pin}});s.conn=conn;
+function setOn(s,on,msg){s.on=on;s.el.classList.toggle('on',on);s.el.querySelector('.st').textContent=msg||(on?'Live':'Offline');
+ const ob=s.el.querySelector('.offbadge');if(on){ob.textContent='';ob.classList.remove('show');s.lastSeen=Date.now()}
+ else{const t=s.lastSeen||Date.now();ob.textContent='Offline · last seen '+new Date(t).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'});ob.classList.add('show');
+  IDB.getFrame(s.code||Object.keys(state).find(k=>state[k]===s)).then(f=>{if(f&&f.dataUrl){const v=s.el.querySelector('video');if(!s.on){v.poster=f.dataUrl;/* keep last */const img=s.el.querySelector('.lastframe')||Object.assign(document.createElement('img'),{className:'lastframe'});img.src=f.dataUrl;if(!img.parentNode)v.parentNode.insertBefore(img,v)}}})}}
+function snapFrame(code){const s=state[code];if(!s||!s.on)return;const v=s.el.querySelector('video');if(!v.videoWidth)return;
+ const k=document.createElement('canvas');k.width=v.videoWidth;k.height=v.videoHeight;k.getContext('2d').drawImage(v,0,0);
+ IDB.putFrame(code,k.toDataURL('image/jpeg',0.7),Date.now())}
+function connect(code){const s=state[code];if(!s||s.on||!peer||peer.disconnected||!peer.id||!navigator.onLine)return;const c=cams.find(x=>x.code==code);
+ if(s.conn&&s.conn.open)return;if(s.connecting)return;s.connecting=true;s.attempt=(s.attempt||0)+1;
+ const conn=peer.connect(P+code,{metadata:{pin:c.pin}});s.conn=conn;
+ const fail=()=>{s.connecting=false;setOn(s,false);const wait=Math.min(30000,1000*Math.pow(1.6,Math.min(s.attempt,8)));clearTimeout(s.rt);s.rt=setTimeout(()=>connect(code),wait)};
+ conn.on('open',()=>{s.connecting=false;s.attempt=0});
  conn.on('data',d=>{if(d&&d.type=='denied')setOn(s,false,'Wrong PIN');if(d&&d.type=='event')onEvent(code,d)});
- conn.on('close',()=>setOn(s,false))}
+ conn.on('close',fail);conn.on('error',fail)}
 function onEvent(code,d){const s=state[code];if(!s)return;s.el.querySelector('.badge').textContent=d.kind+' · '+new Date(d.t).toLocaleTimeString();
  s.el.classList.add('alert');clearTimeout(s.tm);s.tm=setTimeout(()=>s.el.classList.remove('alert'),10000);
- const k='alfredEv_'+code,l=JSON.parse(localStorage.getItem(k)||'[]');l.unshift({kind:d.kind,t:d.t});localStorage.setItem(k,JSON.stringify(l.slice(0,20)));showEv(code)}
+ const k='alfredEv_'+code,l=JSON.parse(localStorage.getItem(k)||'[]');l.unshift({kind:d.kind,t:d.t});localStorage.setItem(k,JSON.stringify(l.slice(0,20)));IDB.addEvent({code,kind:d.kind,t:d.t,name:d.name||''});showEv(code)}
 function showEv(code){const s=state[code];if(!s)return;const l=JSON.parse(localStorage.getItem('alfredEv_'+code)||'[]');
  s.el.querySelector('.ev').innerHTML=l.length?l.slice(0,8).map(e=>`<div>${e.kind} — ${new Date(e.t).toLocaleString()}</div>`).join(''):'<div>No events yet</div>'}
 function render(){$('#grid').innerHTML='';$('#empty').style.display=cams.length?'none':'';cams.forEach(c=>{
  const el=document.createElement('div');el.className='cam';el.id='cam-'+c.code;
- el.innerHTML=`<span class="badge"></span><video autoplay playsinline muted></video><div class="bar"><span><span class="dot"></span><b></b> <span class="st mut">Connecting…</span></span><span class="row"><button class="ghost snap">Snapshot</button><button class="ghost rm">Remove</button></span></div><details class="evw"><summary>Recent events</summary><div class="ev mut"></div></details>`;
+ el.innerHTML=`<span class="badge"></span><span class="offbadge"></span><video autoplay playsinline muted></video><div class="bar"><span><span class="dot"></span><b></b> <span class="st mut">Connecting…</span></span><span class="row"><button class="ghost snap">Snapshot</button><button class="ghost rm">Remove</button></span></div><details class="evw"><summary>Recent events</summary><div class="ev mut"></div></details>`;
  el.querySelector('b').textContent=c.name||c.code;const v=el.querySelector('video');
  v.onclick=()=>{(v.requestFullscreen||v.webkitEnterFullscreen||function(){}).call(v)};
  el.querySelector('.snap').onclick=()=>{if(!v.videoWidth)return;const k=document.createElement('canvas');k.width=v.videoWidth;k.height=v.videoHeight;k.getContext('2d').drawImage(v,0,0);
   const a=document.createElement('a');a.download=`alfred-${c.name||c.code}-${Date.now()}.png`;a.href=k.toDataURL('image/png');a.click()};
  el.querySelector('.rm').onclick=()=>{if(!confirm('Remove '+(c.name||c.code)+'?'))return;const s=state[c.code];s.call&&s.call.close();s.conn&&s.conn.close();delete state[c.code];cams=cams.filter(x=>x.code!=c.code);save();render()};
- state[c.code]={el};$('#grid').appendChild(el);showEv(c.code)})}
+ state[c.code]={el,code:c.code};$('#grid').appendChild(el);showEv(c.code)})}
 $('#add').onclick=()=>{const code=$('#code').value.trim().toUpperCase(),pin=$('#pin').value.trim();if(!code||!pin)return alert('Enter code and PIN');
  cams=cams.filter(x=>x.code!=code);cams.push({code,pin,name:$('#nm').value.trim()});save();Object.values(state).forEach(s=>{s.call&&s.call.close();s.conn&&s.conn.close()});render();cams.forEach(c=>connect(c.code));$('#code').value=$('#pin').value=$('#nm').value=''};
 
@@ -131,16 +141,27 @@ $('#pushOn').onclick=async()=>{const vapid=$('#vapid').value.trim();if(!vapid)re
  try{await SB.saveSub(JSON.parse(JSON.stringify(sub)));$('#pushStat').textContent='Subscribed'}catch(e){$('#pushStat').textContent='Saved locally; push_subs upsert failed: '+e.message}};
 
 /* clips */
-async function loadClips(){const box=$('#clips');box.innerHTML='';const u=await SB.user();if(!u){$('#clipsInfo').textContent='Sign in under Settings to load cloud clips.';return}
- $('#clipsInfo').textContent='Loading…';try{const items=await SB.listAll();$('#clipsInfo').textContent=items.length?items.length+' clip(s)':'No clips yet';
- for(const it of items){const path=(it.folder?it.folder+'/':'')+it.name;const url=await SB.url(path);
+function renderClipRow(it,url,local){const box=$('#clips');const path=it.path||((it.folder?it.folder+'/':'')+it.name);
   const el=document.createElement('div');el.className='clip';
-  el.innerHTML=`<video controls playsinline preload="metadata" src="${url}"></video><div class="meta"><b>${it.folder||'—'}</b><div class="mut">${it.name}</div><div class="mut">${it.created_at?new Date(it.created_at).toLocaleString():''}</div></div><button class="ghost del">Delete</button>`;
-  el.querySelector('.del').onclick=async()=>{if(!confirm('Delete clip?'))return;await SB.del(path);loadClips()};box.appendChild(el)}}
- catch(e){$('#clipsInfo').textContent='Error: '+e.message}}
+  el.innerHTML=`<video controls playsinline preload="metadata" ${url?'src="'+url+'"':''}></video><div class="meta"><b>${it.folder||it.camera||'—'}</b><div class="mut">${it.name||path}</div><div class="mut">${it.created_at?new Date(it.created_at).toLocaleString():(it.t?new Date(it.t).toLocaleString():'')}${local?' · cached':''}</div></div>${local?'':'<button class="ghost del">Delete</button>'}`;
+  const del=el.querySelector('.del');if(del)del.onclick=async()=>{if(!confirm('Delete clip?'))return;await SB.del(path);loadClips()};box.appendChild(el)}
+async function loadClips(){const box=$('#clips');box.innerHTML='';
+ if(!navigator.onLine){const cached=await IDB.listClipMeta();$('#clipsInfo').textContent=(cached.length?cached.length+' cached clip(s)':'No cached clips')+' · offline';
+  cached.forEach(it=>renderClipRow(it,it.signedUrl||'',true));return}
+ const u=await SB.user();if(!u){$('#clipsInfo').textContent='Sign in under Settings to load cloud clips.';const cached=await IDB.listClipMeta();cached.forEach(it=>renderClipRow(it,'',true));return}
+ $('#clipsInfo').textContent='Loading…';try{const items=await SB.listAll();$('#clipsInfo').textContent=items.length?items.length+' clip(s)':'No clips yet';
+ const meta=[];for(const it of items){const path=(it.folder?it.folder+'/':'')+it.name;const url=await SB.url(path);
+  meta.push({path,folder:it.folder,name:it.name,created_at:it.created_at,signedUrl:url});renderClipRow({...it,path},url,false)}
+ await IDB.putClipMeta(meta)}
+ catch(e){$('#clipsInfo').textContent='Error: '+e.message+' — showing cache';const cached=await IDB.listClipMeta();cached.forEach(it=>renderClipRow(it,it.signedUrl||'',true))}}
 $('#refreshClips').onclick=loadClips;
 
 render();startPeer();setInterval(()=>cams.forEach(c=>connect(c.code)),10000);refreshAuth();
 const focus=new URLSearchParams(location.search).get('cam');if(focus)setTimeout(()=>{const el=$('#cam-'+focus);el&&el.scrollIntoView({behavior:'smooth',block:'center'})},800);
+
+window.addEventListener('online',()=>{document.body.classList.remove('netoff');const nb=document.getElementById('netBanner');if(nb)nb.style.display='none';cams.forEach(c=>connect(c.code));loadClips()});
+window.addEventListener('offline',()=>{document.body.classList.add('netoff');const nb=document.getElementById('netBanner');if(nb)nb.style.display='block';Object.values(state).forEach(s=>setOn(s,false,'Offline'))});
+if(!navigator.onLine){document.body.classList.add('netoff');const nb0=document.getElementById('netBanner');if(nb0)nb0.style.display='block'}
+setInterval(()=>cams.forEach(c=>snapFrame(c.code)),10000);
 if('serviceWorker'in navigator)navigator.serviceWorker.register('sw.js');
 </script></body></html>

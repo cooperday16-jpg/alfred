@@ -4,7 +4,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="manifest" href="manifest.json"><link rel="apple-touch-icon" href="apple-touch-icon.png"><link rel="stylesheet" href="style.css">
 <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script><script src="sb.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script><script src="sb.js"></script><script src="idb.js"></script>
 </head><body>
 <div id="live" class="live" hidden>● LIVE</div>
 <header><h1>Alfred · Camera</h1><a href="index.html">Viewer</a></header>
@@ -53,6 +53,13 @@ function startRec(full){if(!window.MediaRecorder){cst('MediaRecorder unsupported
    if(Date.now()<postUntil){/* keep going */}if(running)loop()};
   rec.start();setTimeout(()=>{try{rec.state!=='inactive'&&rec.stop()}catch(e){}},4000)}
  loop();cst('Recording buffer ready')}
+async function flushQueue(){if(!navigator.onLine||flushing)return;flushing=true;
+ try{const q=await IDB.listQueuedClips();for(const item of q){try{const u=await SB.user();
+  if(u){await SB.uploadClip(item.path,item.blob,{kind:item.kind,camera:item.camera,t:item.t});
+   if(item.notify&&Date.now()-(lastPush[item.kind]||0)>120000){lastPush[item.kind]=Date.now();try{await SB.notify(item.notify)}catch(e){}}
+   await IDB.delQueued(item.id);cst('Uploaded queued: '+item.path)}
+  else break}catch(e){cst('Queue upload retry later: '+e.message);break}}
+  const left=(await IDB.listQueuedClips()).length;if(left)cst(left+' clip(s) queued offline')}finally{flushing=false}}
 async function saveClip(kind){if(Date.now()-lastClip<45000)return;lastClip=Date.now();postUntil=Date.now()+32000;
  const name=($('#nm').value||code).replace(/[^\w\- ]+/g,'_').trim()||code;
  const stamp=new Date().toISOString().replace(/[:.]/g,'-');
@@ -60,13 +67,21 @@ async function saveClip(kind){if(Date.now()-lastClip<45000)return;lastClip=Date.
  if(!blob.size){cst('No buffer yet');return}
  const ext=(recMime||'').includes('mp4')?'mp4':'webm';
  const path=name+'/'+stamp+'_'+kind+'.'+ext;
+ const notify={title:kind+' · '+name+' · '+new Date().toLocaleTimeString([],{hour:'numeric',minute:'2-digit'}),body:'Tap to open Alfred',url:'./?cam='+encodeURIComponent(code),camera:code};
  cst('Saving clip…');
- try{const u=await SB.user();if(u){await SB.uploadClip(path,blob,{kind,camera:name,t:Date.now()});cst('Uploaded: '+path);
-  if(Date.now()-(lastPush[kind]||0)>120000){lastPush[kind]=Date.now();try{await SB.notify({title:kind+' · '+name+' · '+new Date().toLocaleTimeString([],{hour:'numeric',minute:'2-digit'}),body:'Tap to open Alfred',url:'./?cam='+encodeURIComponent(code),camera:code})}catch(e){}}}
-  else{const a=document.createElement('a');a.download=path.replace('/','-');a.href=URL.createObjectURL(blob);a.click();cst('Saved locally (configure Supabase in Viewer Settings for cloud)')}}
- catch(e){cst('Upload failed — saving locally');const a=document.createElement('a');a.download=path.replace('/','-');a.href=URL.createObjectURL(blob);a.click()}}
+ // retention: keep at most 30 queued clips
+ const queued=await IDB.listQueuedClips();if(queued.length>=30){await IDB.delQueued(queued[0].id)}
+ try{if(!navigator.onLine)throw new Error('offline');
+  const u=await SB.user();
+  if(u){await SB.uploadClip(path,blob,{kind,camera:name,t:Date.now()});cst('Uploaded: '+path);
+   if(Date.now()-(lastPush[kind]||0)>120000){lastPush[kind]=Date.now();try{await SB.notify(notify)}catch(e){}}}
+  else{await IDB.queueClip({path,blob,kind,camera:name,t:Date.now(),notify});
+   const a=document.createElement('a');a.download=path.replace('/','-');a.href=URL.createObjectURL(blob);a.click();cst('Saved locally + queued (sign in for cloud)')}}
+ catch(e){await IDB.queueClip({path,blob,kind,camera:name,t:Date.now(),notify});cst('Queued offline: '+path)}}
+let flushing=false;
 function fire(kind){const n=Date.now();if(n-(last[kind]||0)<5000)return;last[kind]=n;
- conns.forEach(x=>{try{x.open&&x.send({type:'event',kind,t:n,name:$('#nm').value})}catch(e){}});
+ const payload={type:'event',kind,t:n,name:$('#nm').value};conns.forEach(x=>{try{x.open&&x.send(payload)}catch(e){}});
+ IDB.addEvent({code,kind,t:n,name:$('#nm').value,pending:!navigator.onLine});
  st('Last '+kind+': '+new Date(n).toLocaleTimeString());saveClip(kind);
  }
 function startDetect(full){const v=$('#v'),k=document.createElement('canvas');k.width=64;k.height=48;const g=k.getContext('2d',{willReadFrequently:true});let prev=null;
@@ -84,5 +99,9 @@ $('#go').onclick=async()=>{const pin=$('#pin').value.trim();if(pin.length<4)retu
 $('#stop').onclick=()=>{running=false;try{rec&&rec.state!=='inactive'&&rec.stop()}catch(e){}
  window._full&&_full.getTracks().forEach(t=>t.stop());calls.forEach(c=>c.close());peer&&peer.destroy();stream&&stream.getTracks().forEach(t=>t.stop());
  lock&&lock.release();$('#live').hidden=true;$('#setup').hidden=false;$('#stop').hidden=true;st('Stopped');cst('')};
+
+window.addEventListener('online',()=>{st('Back online — reconnecting…');flushQueue();if(running){try{peer&&!peer.destroyed&&peer.reconnect()}catch(e){if(running)startPeer()}}});
+window.addEventListener('offline',()=>st('Offline — detecting & queuing clips locally'));
+setInterval(()=>{if(running&&navigator.onLine)flushQueue()},30000);
 if('serviceWorker'in navigator)navigator.serviceWorker.register('sw.js');
 </script></body></html>

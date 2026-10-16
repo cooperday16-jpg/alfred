@@ -29,3 +29,6 @@ button:disabled{opacity:.5}.card{background:var(--card);border:1px solid var(--l
 .clip .meta{flex:1}.clip button{min-height:36px;padding:6px 10px}
 details summary{cursor:pointer;color:var(--gold)}
 @media(min-width:900px){.tabs{max-width:420px;left:50%;transform:translateX(-50%);border-radius:16px 16px 0 0}}
+.offbadge{position:absolute;top:8px;right:8px;background:rgba(20,20,20,.85);color:#e8e4da;font-size:11px;padding:4px 8px;border-radius:10px;opacity:0;z-index:2;max-width:70%;text-align:right}
+.offbadge.show{opacity:1}.lastframe{position:absolute;inset:0 auto auto 0;width:100%;aspect-ratio:16/9;object-fit:cover;opacity:.85;pointer-events:none}
+.cam.on .lastframe{display:none}body.netoff #netBanner{display:block!important}
