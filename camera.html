@@ -1,0 +1,88 @@
+<!doctype html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Alfred Camera</title><meta name="theme-color" content="#141414">
+<meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="manifest.json"><link rel="apple-touch-icon" href="apple-touch-icon.png"><link rel="stylesheet" href="style.css">
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script><script src="sb.js"></script>
+</head><body>
+<div id="live" class="live" hidden>● LIVE</div>
+<header><h1>Alfred · Camera</h1><a href="index.html">Viewer</a></header>
+<main>
+<div class="card" id="setup"><h3>Set up this phone</h3>
+<div class="row" style="margin:8px 0"><input id="nm" placeholder="Camera name (e.g. Front door)"></div>
+<div class="row" style="margin:8px 0"><select id="face"><option value="environment">Back camera</option><option value="user">Front camera</option></select>
+<label class="mut"><input type="checkbox" id="aud"> Stream audio</label></div>
+<div class="row" style="margin:8px 0"><label class="mut"><input type="checkbox" id="md" checked> Motion</label>
+<span class="mut">sens</span><input type="range" id="ms" min="1" max="100" value="50"></div>
+<div class="row" style="margin:8px 0"><label class="mut"><input type="checkbox" id="sd"> Sound (uses mic)</label>
+<span class="mut">sens</span><input type="range" id="ss" min="1" max="100" value="50"></div>
+<div class="row" style="margin:8px 0"><input id="pin" placeholder="PIN (4+ digits)" inputmode="numeric"></div>
+<button id="go">Start camera</button>
+<p class="mut" style="margin-top:10px">Cloud clips need Supabase signed in on the Viewer → Settings. Otherwise clips download locally.</p>
+</div>
+<div class="card"><div class="mut">Camera code</div><div class="code" id="code"></div>
+<div class="mut" id="st">Not started</div><div class="mut" id="vw"></div><div class="mut" id="clipst"></div></div>
+<div class="cam"><video id="v" autoplay playsinline muted></video></div>
+<p class="mut">Keep this page open, screen on, plugged in. Viewers need the code + PIN.</p>
+<button class="ghost" id="stop" hidden>Stop</button>
+</main>
+<script>
+const P='alfred-cam-',$=s=>document.querySelector(s);
+let code=localStorage.getItem('alfredCode');if(!code){const a='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';code=Array.from({length:6},()=>a[Math.floor(Math.random()*a.length)]).join('');localStorage.setItem('alfredCode',code)}
+$('#code').textContent=code;['nm','pin','face'].forEach(k=>{const v=localStorage.getItem('alfredCam_'+k);if(v)$('#'+k).value=v});
+let conns=new Set(),last={},lastClip=0,lastPush={},stream,peer,lock,calls=new Set(),running=false;
+let segs=[],rec,recMime='',recording=false,postUntil=0;
+const st=t=>$('#st').textContent=t,cst=t=>$('#clipst').textContent=t,upd=()=>$('#vw').textContent=calls.size?calls.size+' viewer(s) watching':'';
+async function wake(){try{if('wakeLock'in navigator&&!lock){lock=await navigator.wakeLock.request('screen');lock.onrelease=()=>lock=null}}catch(e){}}
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState=='visible'&&running)wake()});
+function startPeer(){peer=new Peer(P+code);
+ peer.on('open',()=>st('Online — waiting for viewers'));
+ peer.on('connection',conn=>{conn.on('open',()=>{if(!conn.metadata||conn.metadata.pin!==$('#pin').value.trim()){conn.send({type:'denied'});setTimeout(()=>conn.close(),500);return}
+  conns.add(conn);conn.on('close',()=>conns.delete(conn));
+  const call=peer.call(conn.peer,stream,{metadata:{code}});calls.add(call);upd();
+  const end=()=>{calls.delete(call);upd()};call.on('close',end);call.on('error',end);conn.on('close',()=>{call.close();end()})})});
+ peer.on('disconnected',()=>{st('Reconnecting…');if(running)setTimeout(()=>peer&&!peer.destroyed&&peer.reconnect(),2000)});
+ peer.on('error',e=>{st('Error: '+e.type+' — retrying');if(running&&['unavailable-id','network','server-error','socket-error','socket-closed'].includes(e.type)){peer.destroy();setTimeout(()=>running&&startPeer(),5000)}});}
+function pickMime(){for(const m of['video/webm;codecs=vp8,opus','video/webm;codecs=vp9,opus','video/webm','video/mp4']){if(MediaRecorder.isTypeSupported(m))return m}return ''}
+function startRec(full){if(!window.MediaRecorder){cst('MediaRecorder unsupported (iOS Safari may need 14.5+)');return}
+ const tracks=full.getVideoTracks().concat(full.getAudioTracks());const ms=new MediaStream(tracks);recMime=pickMime();
+ function loop(){if(!running)return;try{rec=new MediaRecorder(ms,recMime?{mimeType:recMime,videoBitsPerSecond:800000}:{});}catch(e){cst('Recorder fail: '+e.message);return}
+  const chunks=[];rec.ondataavailable=e=>{if(e.data&&e.data.size)chunks.push(e.data)};
+  rec.onstop=()=>{const blob=new Blob(chunks,{type:recMime||'video/webm'});segs.push({t:Date.now(),blob});while(segs.length>8)segs.shift();
+   if(Date.now()<postUntil){/* keep going */}if(running)loop()};
+  rec.start();setTimeout(()=>{try{rec.state!=='inactive'&&rec.stop()}catch(e){}},4000)}
+ loop();cst('Recording buffer ready')}
+async function saveClip(kind){if(Date.now()-lastClip<45000)return;lastClip=Date.now();postUntil=Date.now()+32000;
+ const name=($('#nm').value||code).replace(/[^\w\- ]+/g,'_').trim()||code;
+ const stamp=new Date().toISOString().replace(/[:.]/g,'-');
+ const blob=new Blob(segs.map(s=>s.blob),{type:recMime||'video/webm'});
+ if(!blob.size){cst('No buffer yet');return}
+ const ext=(recMime||'').includes('mp4')?'mp4':'webm';
+ const path=name+'/'+stamp+'_'+kind+'.'+ext;
+ cst('Saving clip…');
+ try{const u=await SB.user();if(u){await SB.uploadClip(path,blob,{kind,camera:name,t:Date.now()});cst('Uploaded: '+path);
+  if(Date.now()-(lastPush[kind]||0)>120000){lastPush[kind]=Date.now();try{await SB.notify({title:kind+' · '+name+' · '+new Date().toLocaleTimeString([],{hour:'numeric',minute:'2-digit'}),body:'Tap to open Alfred',url:'./?cam='+encodeURIComponent(code),camera:code})}catch(e){}}}
+  else{const a=document.createElement('a');a.download=path.replace('/','-');a.href=URL.createObjectURL(blob);a.click();cst('Saved locally (configure Supabase in Viewer Settings for cloud)')}}
+ catch(e){cst('Upload failed — saving locally');const a=document.createElement('a');a.download=path.replace('/','-');a.href=URL.createObjectURL(blob);a.click()}}
+function fire(kind){const n=Date.now();if(n-(last[kind]||0)<5000)return;last[kind]=n;
+ conns.forEach(x=>{try{x.open&&x.send({type:'event',kind,t:n,name:$('#nm').value})}catch(e){}});
+ st('Last '+kind+': '+new Date(n).toLocaleTimeString());saveClip(kind);
+ }
+function startDetect(full){const v=$('#v'),k=document.createElement('canvas');k.width=64;k.height=48;const g=k.getContext('2d',{willReadFrequently:true});let prev=null;
+ setInterval(()=>{if(!running||!$('#md').checked||!v.videoWidth)return;g.drawImage(v,0,0,64,48);const d=g.getImageData(0,0,64,48).data;
+  if(prev){let ch=0;const thr=60-$('#ms').value*0.5;for(let i=0;i<d.length;i+=4){if(Math.abs(d[i]+d[i+1]+d[i+2]-prev[i]-prev[i+1]-prev[i+2])/3>thr+10)ch++}
+   if(ch/(64*48)>(0.12-$('#ms').value*0.0011))fire('Motion')}prev=d.slice()},300);
+ const at=full.getAudioTracks();if(!at.length)return;const ac=new AudioContext(),an=ac.createAnalyser();an.fftSize=1024;ac.createMediaStreamSource(new MediaStream(at)).connect(an);const buf=new Float32Array(an.fftSize);
+ setInterval(()=>{if(!running||!$('#sd').checked)return;if(ac.state=='suspended')ac.resume();an.getFloatTimeDomainData(buf);let s=0;for(const x of buf)s+=x*x;const rms=Math.sqrt(s/buf.length);
+  if(rms>0.3-$('#ss').value*0.0029)fire('Sound')},200)}
+$('#go').onclick=async()=>{const pin=$('#pin').value.trim();if(pin.length<4)return alert('Set a PIN of at least 4 digits');
+ ['nm','pin','face'].forEach(k=>localStorage.setItem('alfredCam_'+k,$('#'+k).value));
+ let full;try{full=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:$('#face').value},width:{ideal:1280},height:{ideal:720}},audio:$('#aud').checked||$('#sd').checked||true})}catch(e){return alert('Camera/mic permission needed: '+e.message)}
+ stream=new MediaStream(full.getVideoTracks().concat($('#aud').checked?full.getAudioTracks():[]));window._full=full;
+ $('#v').srcObject=full;running=true;$('#live').hidden=false;$('#setup').hidden=true;$('#stop').hidden=false;wake();startPeer();startDetect(full);startRec(full)};
+$('#stop').onclick=()=>{running=false;try{rec&&rec.state!=='inactive'&&rec.stop()}catch(e){}
+ window._full&&_full.getTracks().forEach(t=>t.stop());calls.forEach(c=>c.close());peer&&peer.destroy();stream&&stream.getTracks().forEach(t=>t.stop());
+ lock&&lock.release();$('#live').hidden=true;$('#setup').hidden=false;$('#stop').hidden=true;st('Stopped');cst('')};
+if('serviceWorker'in navigator)navigator.serviceWorker.register('sw.js');
+</script></body></html>
