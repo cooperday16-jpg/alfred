@@ -1,0 +1,85 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Alfred</title><meta name="theme-color" content="#1c1c1e">
+<meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="Alfred">
+<link rel="manifest" href="manifest.json"><link rel="apple-touch-icon" href="apple-touch-icon.png"><link rel="icon" href="icon-192.png">
+<style>
+:root{--bg:#1c1c1e;--card:#242426;--line:#333336;--tx:#e8e6e1;--mu:#8e8c87;--gold:#c9a96e}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom)}
+main{max-width:720px;margin:0 auto;padding:48px 22px 80px}
+h1,h2{font-family:"Cormorant Garamond",Georgia,"Times New Roman",serif;font-weight:400;letter-spacing:.01em}
+h1{font-size:2.4rem;margin:0 0 6px}h2{font-size:1.45rem;margin:0 0 18px;color:var(--gold)}
+.sub{color:var(--mu);margin:0 0 40px}.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:26px;margin-bottom:28px}
+.wx{display:flex;gap:28px;flex-wrap:wrap;align-items:baseline}.big{font-size:2.4rem;font-family:Georgia,serif}.mu{color:var(--mu);font-size:.92rem}
+.quote{font-style:italic;color:var(--mu);font-family:Georgia,serif;margin-top:18px;border-left:2px solid var(--gold);padding-left:12px}
+ul{list-style:none;margin:0;padding:0}li{padding:14px 0;border-top:1px solid var(--line);display:flex;gap:12px;align-items:flex-start}li:first-child{border-top:0}
+li .b{flex:1;min-width:0}.done .t{text-decoration:line-through;color:var(--mu)}.unread .t{color:var(--gold)}
+button,input,select{font:inherit;color:var(--tx);background:transparent;border:1px solid var(--line);border-radius:8px;padding:8px 12px}
+input,select{background:#1a1a1c;width:100%}button{cursor:pointer}button:hover{border-color:var(--gold)}.pri{border-color:var(--gold);color:var(--gold)}
+.x{border:0;color:var(--mu);padding:4px 8px}.row{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}
+form{margin-top:18px}.acts{display:flex;gap:8px;margin-top:12px}a{color:var(--gold)}
+#banner{position:fixed;left:50%;top:16px;transform:translateX(-50%);background:var(--card);border:1px solid var(--gold);border-radius:12px;padding:14px 20px;display:none;z-index:9;max-width:90vw}
+.high{border-left:2px solid #c96e6e;padding-left:10px}
+@media(min-width:900px){main{padding-top:80px}h1{font-size:3rem}}
+</style></head><body>
+<div id="banner"></div>
+<main>
+<h1 id="greet">Good day, Carson.</h1><p class="sub" id="date"></p>
+<section class="card"><h2>Morning briefing</h2>
+<div class="wx" id="wx"><span class="mu">Consulting the skies over Orlando…</span></div>
+<p class="mu" style="margin:22px 0 6px">Today</p><ul id="todayList"></ul>
+<p class="mu" style="margin:22px 0 6px">Latest</p><ul id="latestList"></ul>
+<p class="quote" id="quote"></p></section>
+<section class="card"><h2>Reminders</h2><ul id="remList"></ul>
+<form id="f"><input id="ft" placeholder="What shall I remind you of?" required>
+<div class="row"><input id="fd" type="datetime-local" required><select id="fr"><option value="none">Once</option><option value="daily">Daily</option><option value="weekly">Weekly</option></select></div>
+<div class="acts"><button class="pri" type="submit" id="fs">Add reminder</button><button type="button" id="fc" style="display:none">Cancel</button></div></form>
+<p class="mu" id="np" style="margin-top:14px"></p></section>
+<section class="card"><h2>Alerts &amp; summaries</h2><ul id="alList"></ul></section>
+<p class="mu" style="text-align:center">Everything stays on this device.</p>
+</main>
+<script>
+const $=id=>document.getElementById(id),LS=(k,v)=>v===undefined?JSON.parse(localStorage.getItem(k)||'null'):localStorage.setItem(k,JSON.stringify(v));
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let rems=LS('alfred.rem')||[],st=LS('alfred.alert')||{},alerts=[],editing=null;
+const save=()=>LS('alfred.rem',rems),saveA=()=>LS('alfred.alert',st);
+const pad=n=>String(n).padStart(2,'0'),toLocal=d=>`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+const fmt=d=>new Date(d).toLocaleString([], {weekday:'short',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});
+const sameDay=(a,b)=>a.toDateString()===b.toDateString();
+function header(){const n=new Date(),h=n.getHours();$('greet').textContent=`Good ${h<12?'morning':h<17?'afternoon':'evening'}, Carson.`;
+$('date').textContent=n.toLocaleDateString([], {weekday:'long',month:'long',day:'numeric',year:'numeric'})}
+const Q=['Your affairs are in order, sir. I shall keep watch.','All is quiet. Do let me know if anything is required.','I have taken the liberty of arranging the day.','Should you need anything at all, I am close at hand.','Nothing pressing, sir. A fine moment for a coffee.'];
+const WC={0:'Clear',1:'Mostly clear',2:'Partly cloudy',3:'Overcast',45:'Fog',48:'Fog',51:'Light drizzle',53:'Drizzle',55:'Heavy drizzle',61:'Light rain',63:'Rain',65:'Heavy rain',80:'Showers',81:'Showers',82:'Heavy showers',95:'Thunderstorms',96:'Thunderstorms',99:'Thunderstorms'};
+async function weather(){try{const r=await fetch('https://api.open-meteo.com/v1/forecast?latitude=28.54&longitude=-81.38&current=temperature_2m,weather_code&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max&temperature_unit=fahrenheit&timezone=America%2FNew_York&forecast_days=1');
+const j=await r.json(),c=j.current,d=j.daily;
+$('wx').innerHTML=`<span class="big">${Math.round(c.temperature_2m)}°</span><span>${WC[c.weather_code]||'—'}<br><span class="mu">Orlando, FL</span></span><span class="mu">High ${Math.round(d.temperature_2m_max[0])}° · Low ${Math.round(d.temperature_2m_min[0])}°<br>Rain chance ${d.precipitation_probability_max[0]??0}%</span>`}
+catch(e){$('wx').innerHTML='<span class="mu">The weather report is unavailable at the moment.</span>'}}
+function renderRems(){const s=[...rems].sort((a,b)=>a.done-b.done||new Date(a.at)-new Date(b.at));
+$('remList').innerHTML=s.length?s.map(r=>`<li class="${r.done?'done':''}"><input type="checkbox" style="width:auto;margin-top:6px" ${r.done?'checked':''} onchange="toggle('${r.id}')"><div class="b"><div class="t">${esc(r.title)}</div><div class="mu">${fmt(r.at)}${r.repeat!=='none'?' · '+r.repeat:''}</div></div><button class="x" onclick="edit('${r.id}')">Edit</button><button class="x" onclick="del('${r.id}')">✕</button></li>`).join(''):'<li class="mu">No reminders yet.</li>';
+const now=new Date(),t=rems.filter(r=>!r.done&&sameDay(new Date(r.at),now));
+$('todayList').innerHTML=t.length?t.map(r=>`<li><div class="b">${esc(r.title)} <span class="mu">· ${new Date(r.at).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})}</span></div></li>`).join(''):'<li class="mu">Nothing on the calendar today.</li>'}
+function advance(r){const d=new Date(r.at),step=r.repeat==='daily'?1:7;do d.setDate(d.getDate()+step);while(d<=new Date());r.at=toLocal(d);r.fired=false}
+window.toggle=id=>{const r=rems.find(x=>x.id===id);if(!r.done&&r.repeat!=='none')advance(r);else r.done=!r.done;save();renderRems()};
+window.del=id=>{rems=rems.filter(x=>x.id!==id);save();renderRems()};
+window.edit=id=>{const r=rems.find(x=>x.id===id);editing=id;$('ft').value=r.title;$('fd').value=r.at;$('fr').value=r.repeat;$('fs').textContent='Save';$('fc').style.display='';$('ft').focus()};
+function resetF(){editing=null;$('f').reset();$('fs').textContent='Add reminder';$('fc').style.display='none'}
+$('fc').onclick=resetF;
+$('f').onsubmit=e=>{e.preventDefault();const v={title:$('ft').value.trim(),at:$('fd').value,repeat:$('fr').value};
+if(editing)Object.assign(rems.find(x=>x.id===editing),v,{fired:false,done:false});else rems.push({id:Date.now().toString(36),done:false,fired:false,...v});save();resetF();renderRems();askNotify()};
+function askNotify(){if('Notification'in window&&Notification.permission==='default')Notification.requestPermission().then(npText)}
+function npText(){$('np').innerHTML=!('Notification'in window)?'Reminders will appear as a banner while Alfred is open.':Notification.permission==='granted'?'Notifications are on while Alfred is open.':Notification.permission==='denied'?'Notifications are blocked; reminders will appear as a banner.':'<button onclick="askNotify()">Enable notifications</button>'}
+window.askNotify=askNotify;
+function banner(t){const b=$('banner');b.innerHTML=`<strong style="color:var(--gold)">Pardon me, sir.</strong> ${esc(t)} <button class="x" onclick="this.parentNode.style.display='none'">✕</button>`;b.style.display='block'}
+function tick(){const now=new Date();let ch=false;for(const r of rems){if(r.done||r.fired||new Date(r.at)>now)continue;
+let shown=false;if('Notification'in window&&Notification.permission==='granted'){try{new Notification('Alfred',{body:r.title,icon:'icon-192.png'});shown=true}catch(e){}}
+banner(r.title);if(r.repeat!=='none')advance(r);else r.fired=true;ch=true}if(ch){save();renderRems()}header()}
+async function loadAlerts(){try{alerts=await (await fetch('alerts.json',{cache:'no-store'})).json()}catch(e){alerts=[]}renderAlerts()}
+function renderAlerts(){const v=alerts.filter(a=>!(st[a.id]||{}).dismissed).sort((a,b)=>new Date(b.date)-new Date(a.date));
+const item=a=>`<li class="${(st[a.id]||{}).read?'':'unread'}"><div class="b ${a.priority==='high'?'high':''}"><div class="t">${esc(a.title)}</div><div>${esc(a.body)}</div>${a.link&&/^https?:/.test(a.link)?`<a href="${esc(a.link)}" target="_blank" rel="noopener">Open</a> · `:''}<span class="mu">${fmt(a.date)}</span></div>${(st[a.id]||{}).read?'':`<button class="x" onclick="mark('${esc(a.id)}','read')">Read</button>`}<button class="x" onclick="mark('${esc(a.id)}','dismissed')">✕</button></li>`;
+$('alList').innerHTML=v.length?v.map(item).join(''):'<li class="mu">No alerts. All is well.</li>';
+$('latestList').innerHTML=v.length?v.slice(0,2).map(a=>`<li><div class="b">${esc(a.title)}</div></li>`).join(''):'<li class="mu">No news, sir.</li>'}
+window.mark=(id,k)=>{st[id]={...(st[id]||{}),[k]:true};saveA();renderAlerts()};
+header();$('quote').textContent=Q[new Date().getDate()%Q.length];npText();renderRems();weather();loadAlerts();tick();setInterval(tick,15000);
+if('serviceWorker'in navigator)navigator.serviceWorker.register('sw.js');
+</script></body></html>
